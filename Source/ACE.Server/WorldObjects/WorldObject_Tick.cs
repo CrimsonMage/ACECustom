@@ -237,6 +237,10 @@ namespace ACE.Server.WorldObjects
             if (PhysicsObj == null || !PhysicsObj.is_active())
                 return false;
 
+            // Also check the new physics object
+            if (PhysicsObject == null || !PhysicsSystemManager.IsActive(PhysicsObject))
+                return false;
+
             bool isDying = false;
             bool cachedVelocityFix = false;
 
@@ -292,14 +296,19 @@ namespace ACE.Server.WorldObjects
                 stopwatch.Restart();
 
                 // get position before
-                var prevPos = PhysicsObj.Position.Frame.Origin;
+                var prevPos = ((ACE.Server.Physics.Common.Position)PhysicsObj.Position).Frame.Origin;
                 var cellBefore = PhysicsObj.CurCell != null ? PhysicsObj.CurCell.ID : 0;
 
                 //Console.WriteLine($"{Name} - ticking physics");
-                var updated = PhysicsObj.update_object();
+                
+                // Update using the current physics system
+                var updated = PhysicsSystemManager.UpdateObject(PhysicsObject);
+                
+                // For backward compatibility, also update ACE physics
+                var aceUpdated = PhysicsObj.update_object();
 
                 // get position after
-                var newPos = PhysicsObj.Position.Frame.Origin;
+                var newPos = ((ACE.Server.Physics.Common.Position)PhysicsObj.Position).Frame.Origin;
 
                 // handle landblock / cell change
                 var isMoved = (prevPos != newPos);
@@ -326,11 +335,30 @@ namespace ACE.Server.WorldObjects
                     Location.PositionY = newPos.Y;
                     Location.PositionZ = newPos.Z;
 
-                    Location.Rotation = PhysicsObj.Position.Frame.Orientation;
-                    Location.Variation = PhysicsObj.Position.Variation;
+                    Location.Rotation = ((ACE.Server.Physics.Common.Position)PhysicsObj.Position).Frame.Orientation;
+                    Location.Variation = ((ACE.Server.Physics.Common.Position)PhysicsObj.Position).Variation;
 
                     //if (landblockUpdate)
                     //WorldManager.UpdateLandblock.Add(this);
+                }
+                
+                // Also sync with the new physics object position
+                if (PhysicsObject != null)
+                {
+                    var newPhysicsPos = PhysicsSystemManager.GetPosition(PhysicsObject);
+                    if (newPhysicsPos != null)
+                    {
+                        // Update location from new physics system if different
+                        var newPosFromSystem = new Vector3(newPhysicsPos.PositionX, newPhysicsPos.PositionY, newPhysicsPos.PositionZ);
+                        if (newPosFromSystem != newPos)
+                        {
+                            Location.PositionX = newPosFromSystem.X;
+                            Location.PositionY = newPosFromSystem.Y;
+                            Location.PositionZ = newPosFromSystem.Z;
+                            Location.Rotation = new System.Numerics.Quaternion(newPhysicsPos.RotationX, newPhysicsPos.RotationY, newPhysicsPos.RotationZ, newPhysicsPos.RotationW);
+                            Location.Variation = newPhysicsPos.Variation;
+                        }
+                    }
                 }
 
                 /*if (PhysicsObj.IsGrounded)

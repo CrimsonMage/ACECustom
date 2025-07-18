@@ -58,6 +58,7 @@ namespace ACE.Server.WorldObjects
         public ObjectGuid Guid { get; }
 
         public PhysicsObj PhysicsObj { get; protected set; }
+        public IPhysicsObject PhysicsObject { get; protected set; }
 
         public ObjectDescriptionFlag ObjectDescriptionFlags { get; protected set; }
 
@@ -160,28 +161,43 @@ namespace ACE.Server.WorldObjects
                 }
                 // TODO: REMOVE ME?
 
+                // Create physics object using the current physics system
+                PhysicsObject = PhysicsSystemManager.CreatePhysicsObject(setupTableId, Guid, isDynamic);
+                
+                // For backward compatibility, also create the ACE physics object
                 PhysicsObj = PhysicsObj.makeObject(setupTableId, Guid.Full, isDynamic);
             }
             else
             {
+                // Create physics object using the current physics system
+                PhysicsObject = PhysicsSystemManager.CreatePhysicsObject(VariationId);
+                
+                // For backward compatibility, also create the ACE physics object
                 PhysicsObj = new PhysicsObj(VariationId);
                 PhysicsObj.makeAnimObject(SetupTableId, true);
             }
 
+            // Configure the new physics object
+            PhysicsSystemManager.SetObjectGuid(PhysicsObject, Guid);
+            PhysicsSystemManager.SetWeenieObject(PhysicsObject, this);
+            PhysicsSystemManager.SetMotionTableId(PhysicsObject, MotionTableId);
+            PhysicsSystemManager.SetScale(PhysicsObject, ObjScale ?? 1.0f);
+            PhysicsSystemManager.SetState(PhysicsObject, defaultState);
+
+            // Configure the ACE physics object for backward compatibility
             PhysicsObj.set_object_guid(Guid);
-
             PhysicsObj.set_weenie_obj(new WeenieObject(this));
-
             PhysicsObj.SetMotionTableID(MotionTableId);
-
             PhysicsObj.SetScaleStatic(ObjScale ?? 1.0f);
-
             PhysicsObj.State = defaultState;
 
             //if (creature != null) AllowEdgeSlide = true;
 
             if (BumpVelocity)
+            {
+                PhysicsSystemManager.SetVelocity(PhysicsObject, new Vector3(0, 0, 0.5f));
                 PhysicsObj.Velocity = new Vector3(0, 0, 0.5f);
+            }
         }
 
         public bool AddPhysicsObj(int? VariationId)
@@ -199,6 +215,8 @@ namespace ACE.Server.WorldObjects
             {
                 PhysicsObj.DestroyObject();
                 PhysicsObj = null;
+                PhysicsSystemManager.DestroyObject(PhysicsObject);
+                PhysicsObject = null;
                 return false;
             }
 
@@ -211,12 +229,30 @@ namespace ACE.Server.WorldObjects
             location.Variation = VariationId;
             //Console.WriteLine($"PhysicsObj {Name} Location.Variation: {Location.Variation}");
 
-            var success = PhysicsObj.enter_world(location);
+            // Enter world using the current physics system
+            var acePosition = new ACE.Entity.Position(
+                location.ObjCellID,
+                location.Frame.Origin.X,
+                location.Frame.Origin.Y,
+                location.Frame.Origin.Z,
+                location.Frame.Orientation.X,
+                location.Frame.Orientation.Y,
+                location.Frame.Orientation.Z,
+                location.Frame.Orientation.W,
+                location.Variation.HasValue,
+                location.Variation
+            );
+            var success = PhysicsSystemManager.EnterWorld(PhysicsObject, acePosition);
 
-            if (!success || PhysicsObj.CurCell == null)
+            // For backward compatibility, also use ACE physics
+            var aceSuccess = PhysicsObj.enter_world(location);
+
+            if (!success || !aceSuccess || PhysicsObj.CurCell == null)
             {
                 PhysicsObj.DestroyObject();
                 PhysicsObj = null;
+                PhysicsSystemManager.DestroyObject(PhysicsObject);
+                PhysicsObject = null;
                 //Console.WriteLine($"AddPhysicsObj: failure: {Name} @ {cell.ID.ToString("X8")} - {Location.Pos} - {Location.Rotation} - lv: {Location.Variation}, v: {VariationId} - SetupID: {SetupTableId.ToString("X8")}, MTableID: {MotionTableId.ToString("X8")}");
                 return false;
             }

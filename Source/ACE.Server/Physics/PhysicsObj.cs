@@ -79,7 +79,7 @@ namespace ACE.Server.Physics
         public uint ContactPlaneCellID;
         public Vector3 SlidingNormal;
         public Vector3 CachedVelocity;
-        public Dictionary<uint, CollisionRecord> CollisionTable;
+        public Dictionary<uint, ACE.Server.Physics.Alt.CPhysicsObj.CollisionRecord> CollisionTable;
         public bool CollidingWithEnvironment;
         public int[] UpdateTimes;
         public PhysicsObj ProjectileTarget;
@@ -141,7 +141,7 @@ namespace ACE.Server.Physics
             AnimHooks = new List<DatLoader.Entity.AnimationHook>();
             Children = new ChildList();
             ShadowObjects = new Dictionary<uint, ShadowObj>();
-            CollisionTable = new Dictionary<uint, CollisionRecord>();
+            CollisionTable = new Dictionary<uint, ACE.Server.Physics.Alt.CPhysicsObj.CollisionRecord>();
             CellArray = new CellArray();
             UpdateTime = PhysicsTimer.CurrentTime;
             UpdateTimes = new int[UpdateTimeLength];
@@ -2978,9 +2978,15 @@ namespace ACE.Server.Physics
                 return report_environment_collision(prev_has_contact);
 
             if (CollisionTable == null)
-                CollisionTable = new Dictionary<uint, CollisionRecord>();
+                CollisionTable = new Dictionary<uint, ACE.Server.Physics.Alt.CPhysicsObj.CollisionRecord>();
 
-            CollisionTable[obj.ID] = new CollisionRecord(PhysicsTimer.CurrentTime, obj.State.HasFlag(PhysicsState.Ethereal));
+            var record = new ACE.Server.Physics.Alt.CPhysicsObj.CollisionRecord
+            {
+                ObjectID = obj.ID,
+                TouchedTime = PhysicsTimer.CurrentTime,
+                Ethereal = obj.State.HasFlag(PhysicsState.Ethereal)
+            };
+            CollisionTable[obj.ID] = record;
 
             return report_object_collision(obj, prev_has_contact);
         }

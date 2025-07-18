@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Numerics;
 using ACE.Server.Entity;
@@ -143,6 +144,69 @@ namespace ACE.Server.Physics
             return (Min.X <= b.Max.X && Max.X >= b.Min.X) &&
                    (Min.Y <= b.Max.Y && Max.Y >= b.Min.Y) &&
                    (Min.Z <= b.Max.Z && Max.Z >= b.Min.Z);
+        }
+
+        /// <summary>
+        /// Returns TRUE if bounding box intersects with sphere
+        /// </summary>
+        public bool Intersects(ACE.Server.Physics.Alt.CSphere sphere)
+        {
+            if (sphere == null)
+                return false;
+
+            // Find the closest point on the bounding box to the sphere center
+            var closestPoint = new Vector3(
+                Math.Max(Min.X, Math.Min(sphere.Center.X, Max.X)),
+                Math.Max(Min.Y, Math.Min(sphere.Center.Y, Max.Y)),
+                Math.Max(Min.Z, Math.Min(sphere.Center.Z, Max.Z))
+            );
+
+            // Check if the closest point is within the sphere's radius
+            return Vector3.DistanceSquared(closestPoint, sphere.Center) <= sphere.Radius * sphere.Radius;
+        }
+
+        /// <summary>
+        /// Returns TRUE if bounding box intersects with ray
+        /// </summary>
+        public bool IntersectsRay(Vector3 rayOrigin, Vector3 rayDirection, float maxDistance = float.MaxValue)
+        {
+            // Simple ray-box intersection test
+            var tMin = (Min - rayOrigin) / rayDirection;
+            var tMax = (Max - rayOrigin) / rayDirection;
+
+            var t1 = Vector3.Min(tMin, tMax);
+            var t2 = Vector3.Max(tMin, tMax);
+
+            var tNear = Math.Max(Math.Max(t1.X, t1.Y), t1.Z);
+            var tFar = Math.Min(Math.Min(t2.X, t2.Y), t2.Z);
+
+            return tNear <= tFar && tFar >= 0 && tNear <= maxDistance;
+        }
+
+        /// <summary>
+        /// Returns distance to point
+        /// </summary>
+        public float DistanceTo(Vector3 point)
+        {
+            var closestPoint = new Vector3(
+                Math.Max(Min.X, Math.Min(point.X, Max.X)),
+                Math.Max(Min.Y, Math.Min(point.Y, Max.Y)),
+                Math.Max(Min.Z, Math.Min(point.Z, Max.Z))
+            );
+
+            return Vector3.Distance(closestPoint, point);
+        }
+
+        /// <summary>
+        /// Returns union of two bounding boxes
+        /// </summary>
+        public BoundingBox Union(BoundingBox other)
+        {
+            var unionBox = new BoundingBox();
+            unionBox.Min = Vector3.Min(Min, other.Min);
+            unionBox.Max = Vector3.Max(Max, other.Max);
+            unionBox.CalcSize();
+            return unionBox;
         }
 
         /// <summary>

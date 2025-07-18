@@ -46,6 +46,13 @@ namespace ACE.Common
         [JsonProperty(DefaultValueHandling = DefaultValueHandling.Populate)]
         public bool WorldDatabasePrecaching { get; set; }
 
+        /// <summary>
+        /// The physics system to use (ACE or GDLE)
+        /// </summary>
+        [System.ComponentModel.DefaultValue("ACE")]
+        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Populate)]
+        public string PhysicsSystem { get; set; } = "ACE";
+
         [System.ComponentModel.DefaultValue(true)]
         [JsonProperty(DefaultValueHandling = DefaultValueHandling.Populate)]
         public bool LandblockPreloading { get; set; }

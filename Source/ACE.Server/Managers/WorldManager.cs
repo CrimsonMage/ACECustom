@@ -54,6 +54,20 @@ namespace ACE.Server.Managers
         {
             Physics = new PhysicsEngine(new SmartBox());
             Physics.Server = true;
+            
+            // Initialize the physics system manager
+            PhysicsSystemManager.Initialize();
+            
+            // Set the physics system based on configuration
+            var physicsSystemConfig = ConfigManager.Config.Server.PhysicsSystem;
+            if (physicsSystemConfig.Equals("GDLE", StringComparison.OrdinalIgnoreCase))
+            {
+                PhysicsSystemManager.SetPhysicsSystem(PhysicsSystemManager.PhysicsSystemType.GDLE);
+            }
+            else
+            {
+                PhysicsSystemManager.SetPhysicsSystem(PhysicsSystemManager.PhysicsSystemType.ACE);
+            }
         }
 
         public static void Initialize()

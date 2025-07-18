@@ -92,6 +92,12 @@
     // With this disabled, caching happens on an as-requested basis and can cause the server to feel less responsive.
     "WorldDatabasePrecaching": false,
 
+    // PhysicsSystem, default: "ACE"
+    // The physics system to use: "ACE" (original) or "GDLE" (ported from GDLE)
+    // GDLE physics provides more accurate collision detection and movement precision
+    // Note: GDLE physics is experimental and may not be fully implemented
+    "PhysicsSystem": "ACE",
+
     // LandblockPreloading, defaut: true
     // Development recommendation: true
     // Server recommendation: true

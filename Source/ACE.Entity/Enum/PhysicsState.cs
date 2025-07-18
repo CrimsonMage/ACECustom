@@ -30,5 +30,6 @@ namespace ACE.Entity.Enum
         EdgeSlide                     = 0x00400000,
         Sledding                      = 0x00800000,
         Frozen                        = 0x01000000,
+        FreeRotate                    = 0x02000000,
     }
 }

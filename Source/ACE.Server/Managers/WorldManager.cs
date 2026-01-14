@@ -62,6 +62,10 @@ namespace ACE.Server.Managers
 
         public static void Initialize()
         {
+            // CRITICAL: Initialize RuntimeToggles before any code that uses them
+            // This must happen early to ensure toggles are loaded from database before PlayerEnterWorld can be called
+            RuntimeToggles.Initialize();
+
             // CRITICAL: Register callback factory with SaveScheduler as the FIRST thing in initialization
             // This must be set before any saves can be requested, as SaveScheduler relies on it for
             // thread-safe callback execution on the world thread (e.g., login drain callbacks)
@@ -113,7 +117,30 @@ namespace ACE.Server.Managers
                 PlayerManager.BootAllPlayers();
         }
 
+        // Track active PlayerEnterWorld operations to prevent reentrancy
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, bool> activePlayerEnterWorld = new System.Collections.Concurrent.ConcurrentDictionary<uint, bool>();
+
         public static void PlayerEnterWorld(Session session, LoginCharacter character)
+        {
+            // Reentrancy guard: prevent concurrent PlayerEnterWorld calls for the same character
+            if (activePlayerEnterWorld.TryAdd(character.Id, true))
+            {
+                try
+                {
+                    PlayerEnterWorldInternal(session, character);
+                }
+                finally
+                {
+                    activePlayerEnterWorld.TryRemove(character.Id, out _);
+                }
+            }
+            else
+            {
+                log.Debug($"[LOGIN] PlayerEnterWorld already in progress for character {character.Name} (Id: 0x{character.Id:X8}), ignoring duplicate call");
+            }
+        }
+
+        private static void PlayerEnterWorldInternal(Session session, LoginCharacter character)
         {
             var offlinePlayer = PlayerManager.GetOfflinePlayer(character.Id);
 
@@ -176,20 +203,136 @@ namespace ACE.Server.Managers
                 DatabaseManager.Shard.GetPossessedBiotasInParallel(character.Id, biotas =>
                 {
                     log.Debug($"GetPossessedBiotasInParallel for {character.Name} took {(DateTime.UtcNow - start).TotalMilliseconds:N0} ms, Queue Size: {DatabaseManager.Shard.QueueCount}");
-                    ActionQueue.EnqueueAction(new ActionEventDelegate(ActionType.WorldManager_DoPlayerEnterWorld, () => DoPlayerEnterWorld(session, fullCharacter, offlinePlayer.Biota, biotas)));
+                    
+                    if (!RuntimeToggles.CooperativeLoginEnabled)
+                    {
+                        EnqueueLegacyPlayerEnterWorld(session, fullCharacter, offlinePlayer.Biota, biotas);
+                    }
+                    else
+                    {
+                        EnqueueCooperativePlayerEnterWorld(session, fullCharacter, offlinePlayer.Biota, biotas);
+                    }
                 });
             });            
         }
 
-        private static void DoPlayerEnterWorld(Session session, Character character, Biota playerBiota, PossessedBiotas possessedBiotas)
+        private static void EnqueueLegacyPlayerEnterWorld(Session session, Character character, Biota playerBiota, PossessedBiotas possessedBiotas)
         {
-            Player player;
+            ActionQueue.EnqueueAction(new ActionEventDelegate(ActionType.WorldManager_DoPlayerEnterWorld, () => DoPlayerEnterWorld(session, character, playerBiota, possessedBiotas)));
+        }
 
-            Player.HandleNoLogLandblock(playerBiota, out var playerLoggedInOnNoLogLandblock);
+        // CooperativeLogin:
+        // This path breaks PlayerEnterWorld work into small, yieldable phases
+        // executed on the world thread to preserve responsiveness under load.
+        // Semantics are identical to the legacy path; only scheduling differs.
+        private class CooperativeLoginState
+        {
+            public Session Session;
+            public Character Character;
+            public Biota PlayerBiota;
+            public PossessedBiotas PossessedBiotas;
+            public PermissionChanges PermissionChanges;
+            public bool OlthoiPlayerReturnedToLifestone;
+        }
 
-            var stripAdminProperties = false;
-            var addAdminProperties = false;
-            var addSentinelProperties = false;
+        private static void EnqueueCooperativePlayerEnterWorld(Session session, Character character, Biota playerBiota, PossessedBiotas possessedBiotas)
+        {
+            var state = new CooperativeLoginState
+            {
+                Session = session,
+                Character = character,
+                PlayerBiota = playerBiota,
+                PossessedBiotas = possessedBiotas
+            };
+
+            // Start with Phase 1 - only enqueue the first phase
+            RunCooperativeLoginPhase(state, 1);
+        }
+
+        private static void RunCooperativeLoginPhase(CooperativeLoginState state, int phase)
+        {
+            ActionQueue.EnqueueAction(new ActionEventDelegate(ActionType.WorldManager_DoPlayerEnterWorld, () =>
+            {
+                // Session state validation: must not be terminated
+                if (state.Session == null || state.Session.State == Network.Enum.SessionState.TerminationStarted)
+                    return;
+
+                switch (phase)
+                {
+                    case 1: // Determine permissions changes
+                        state.PermissionChanges = DeterminePermissionsChanges(state.Session, state.Character, state.PlayerBiota);
+                        RunCooperativeLoginPhase(state, 2);
+                        break;
+
+                    case 2: // Construct player
+                        if (state.Session.Player != null)
+                        {
+                            log.Warn($"[LOGIN] Phase 2: session.Player already exists for character {state.Character.Name}, aborting cooperative login");
+                            return;
+                        }
+
+                        var player = ConstructPlayer(state.PlayerBiota, state.PossessedBiotas, state.Character, state.Session);
+                        state.Session.SetPlayer(player);
+                        log.Info($"[LOGIN] {player.Name} using Cooperative login path");
+                        RunCooperativeLoginPhase(state, 3);
+                        break;
+
+                    case 3: // Clear SaveInProgress and apply permission properties
+                        var player3 = state.Session.Player;
+                        if (player3 == null)
+                        {
+                            log.Warn($"[LOGIN] Phase 3: session.Player is null for character {state.Character.Name}, aborting cooperative login");
+                            return;
+                        }
+
+                        ClearAbandonedSaveInProgress(player3);
+                        ApplyPermissionProperties(player3, state.PermissionChanges);
+                        RunCooperativeLoginPhase(state, 4);
+                        break;
+
+                    case 4: // Ensure location
+                        var player4 = state.Session.Player;
+                        if (player4 == null)
+                        {
+                            log.Warn($"[LOGIN] Phase 4: session.Player is null for character {state.Character.Name}, aborting cooperative login");
+                            return;
+                        }
+
+                        EnsureLocation(player4, state.Character, state.PlayerBiota, out state.OlthoiPlayerReturnedToLifestone);
+                        RunCooperativeLoginPhase(state, 5);
+                        break;
+
+                    case 5: // Spawn player and send messages
+                        var player5 = state.Session.Player;
+                        if (player5 == null)
+                        {
+                            log.Warn($"[LOGIN] Phase 5: session.Player is null for character {state.Character.Name}, aborting cooperative login");
+                            return;
+                        }
+
+                        SpawnPlayer(player5);
+
+                        // Send messages after player is fully materialized
+                        // Run synchronously in the same phase to preserve exact message ordering from legacy flow
+                        SendPlayerEnterWorldMessages(state.Session, state.Character, player5, state.OlthoiPlayerReturnedToLifestone, state.PermissionChanges.PlayerLoggedInOnNoLogLandblock);
+                        break;
+                }
+            }));
+        }
+
+        private struct PermissionChanges
+        {
+            public bool StripAdminProperties;
+            public bool AddAdminProperties;
+            public bool AddSentinelProperties;
+            public bool PlayerLoggedInOnNoLogLandblock;
+        }
+
+        private static PermissionChanges DeterminePermissionsChanges(Session session, Character character, Biota playerBiota)
+        {
+            var result = new PermissionChanges();
+            Player.HandleNoLogLandblock(playerBiota, out result.PlayerLoggedInOnNoLogLandblock);
+
             if (ConfigManager.Config.Server.Accounts.OverrideCharacterPermissions)
             {
                 if (session.AccessLevel <= AccessLevel.Advocate) // check for elevated characters
@@ -198,7 +341,7 @@ namespace ACE.Server.Managers
                     {
                         character.IsPlussed = false;
                         playerBiota.WeenieType = WeenieType.Creature;
-                        stripAdminProperties = true;
+                        result.StripAdminProperties = true;
                     }
                 }
                 else if (session.AccessLevel >= AccessLevel.Sentinel && session.AccessLevel <= AccessLevel.Envoy)
@@ -207,7 +350,7 @@ namespace ACE.Server.Managers
                     {
                         character.IsPlussed = true;
                         playerBiota.WeenieType = WeenieType.Sentinel;
-                        addSentinelProperties = true;
+                        result.AddSentinelProperties = true;
                     }
                 }
                 else // Developers and Admins
@@ -216,31 +359,38 @@ namespace ACE.Server.Managers
                     {
                         character.IsPlussed = true;
                         playerBiota.WeenieType = WeenieType.Admin;
-                        addAdminProperties = true;
+                        result.AddAdminProperties = true;
                     }
                 }
             }
 
+            return result;
+        }
+
+        private static Player ConstructPlayer(Biota playerBiota, PossessedBiotas possessedBiotas, Character character, Session session)
+        {
             if (playerBiota.WeenieType == WeenieType.Admin)
-                player = new Admin(playerBiota, possessedBiotas.Inventory, possessedBiotas.WieldedItems, character, session);
+                return new Admin(playerBiota, possessedBiotas.Inventory, possessedBiotas.WieldedItems, character, session);
             else if (playerBiota.WeenieType == WeenieType.Sentinel)
-                player = new Sentinel(playerBiota, possessedBiotas.Inventory, possessedBiotas.WieldedItems, character, session);
+                return new Sentinel(playerBiota, possessedBiotas.Inventory, possessedBiotas.WieldedItems, character, session);
             else
-                player = new Player(playerBiota, possessedBiotas.Inventory, possessedBiotas.WieldedItems, character, session);
+                return new Player(playerBiota, possessedBiotas.Inventory, possessedBiotas.WieldedItems, character, session);
+        }
 
-            session.SetPlayer(player);
-
-            // Clear abandoned SaveInProgress from previous server boots before world entry
-            if (player.SaveInProgress &&
-                player.SaveServerBootId != ServerRuntime.BootId)
+        private static void ClearAbandonedSaveInProgress(Player player)
+        {
+            if (player.SaveInProgress && player.SaveServerBootId != ServerRuntime.BootId)
             {
                 log.Warn($"[LOGIN] Clearing abandoned SaveInProgress for {player.Name}");
                 player.SaveInProgress = false;
                 player.SaveStartTime = DateTime.MinValue;
                 player.SaveServerBootId = null;
             }
+        }
 
-            if (stripAdminProperties) // continue stripping properties
+        private static void ApplyPermissionProperties(Player player, PermissionChanges changes)
+        {
+            if (changes.StripAdminProperties)
             {
                 player.CloakStatus = CloakStatus.Undef;
                 player.Attackable = true;
@@ -254,17 +404,14 @@ namespace ACE.Server.Managers
                 player.IgnorePortalRestrictions = false;
                 player.SafeSpellComponents = false;
                 player.ReportCollisions = true;
-
-
                 player.ChangesDetected = true;
                 player.CharacterChangesDetected = true;
             }
 
-            if (addSentinelProperties || addAdminProperties) // continue restoring properties to default
+            if (changes.AddSentinelProperties || changes.AddAdminProperties)
             {
                 WorldObject weenie;
-
-                if (addAdminProperties)
+                if (changes.AddAdminProperties)
                     weenie = Factories.WorldObjectFactory.CreateWorldObject(DatabaseManager.World.GetCachedWeenie("admin"), new ACE.Entity.ObjectGuid(ACE.Entity.ObjectGuid.Invalid.Full));
                 else
                     weenie = Factories.WorldObjectFactory.CreateWorldObject(DatabaseManager.World.GetCachedWeenie("sentinel"), new ACE.Entity.ObjectGuid(ACE.Entity.ObjectGuid.Invalid.Full));
@@ -279,60 +426,91 @@ namespace ACE.Server.Managers
                     player.ChannelsAllowed = (Channel?)weenie.GetProperty(PropertyInt.ChannelsAllowed);
                     player.Invincible = false;
                     player.Cloaked = false;
-
-
                     player.ChangesDetected = true;
                     player.CharacterChangesDetected = true;
                 }
             }
+        }
+
+        private static bool EnsureLocation(Player player, Character character, Biota playerBiota, out bool olthoiPlayerReturnedToLifestone)
+        {
+            olthoiPlayerReturnedToLifestone = false;
 
             // If the client is missing a location, we start them off in the starter town they chose
-            if (session.Player.Location == null)
+            if (player.Location == null)
             {
-                if (session.Player.Instantiation != null)
-                    session.Player.Location = new Position(session.Player.Instantiation);
+                if (player.Instantiation != null)
+                    player.Location = new Position(player.Instantiation);
                 else
-                    session.Player.Location = new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f);  // ultimate fallback
+                    player.Location = new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f);  // ultimate fallback
             }
 
-            var olthoiPlayerReturnedToLifestone = session.Player.IsOlthoiPlayer && character.TotalLogins >= 1 && session.Player.LoginAtLifestone;
+            olthoiPlayerReturnedToLifestone = player.IsOlthoiPlayer && character.TotalLogins >= 1 && player.LoginAtLifestone;
             if (olthoiPlayerReturnedToLifestone)
-                session.Player.Location = new Position(session.Player.Sanctuary);
+                player.Location = new Position(player.Sanctuary);
 
-            //explicitly set the varation if the player has one saved in their playerBiota
-            var savedLoc = playerBiota.GetPosition(PositionType.Location, new ReaderWriterLockSlim());
+            // Explicitly set the variation if the player has one saved in their playerBiota
+            var savedLoc = playerBiota.GetPosition(PositionType.Location, player.BiotaDatabaseLock);
             if (savedLoc != null)
             {
-                session.Player.Location.Variation = savedLoc.Variation;
+                player.Location.Variation = savedLoc.Variation;
+                return true;
             }
             else
             {
-                log.Error($"Saved Player Biota location position does not exist for {session.Player.Name}, variation could not be found and set");
+                log.Error($"Saved Player Biota location position does not exist for {player.Name}, variation could not be found and set");
+                return false;
             }
+        }
 
-            session.Player.PlayerEnterWorld();
+        private static void SpawnPlayer(Player player)
+        {
+            player.PlayerEnterWorld();
 
-            var success = LandblockManager.AddObject(session.Player, true);
+            var success = LandblockManager.AddObject(player, true);
             if (!success)
             {
                 // send to lifestone, or fallback location
-                var fixLoc = session.Player.Sanctuary ?? new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f);
+                var fixLoc = player.Sanctuary ?? new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f);
 
-                log.Error($"WorldManager.DoPlayerEnterWorld: failed to spawn {session.Player.Name}, relocating to {fixLoc.ToLOCString()}");
+                log.Error($"WorldManager.DoPlayerEnterWorld: failed to spawn {player.Name}, relocating to {fixLoc.ToLOCString()}");
 
-                session.Player.Location = new Position(fixLoc);
-                LandblockManager.AddObject(session.Player, true);
+                player.Location = new Position(fixLoc);
+                LandblockManager.AddObject(player, true);
 
                 var actionChain = new ActionChain();
                 actionChain.AddDelaySeconds(5.0f);
-                actionChain.AddAction(session.Player, ActionType.Landblock_TeleportPlayerAfterFailureToAdd, () =>
+                actionChain.AddAction(player, ActionType.Landblock_TeleportPlayerAfterFailureToAdd, () =>
                 {
-                    if (session != null && session.Player != null)
-                        session.Player.Teleport(fixLoc);
+                    if (player != null)
+                        player.Teleport(fixLoc);
                 });
                 actionChain.EnqueueChain();
             }
+        }
 
+        private static void DoPlayerEnterWorld(Session session, Character character, Biota playerBiota, PossessedBiotas possessedBiotas)
+        {
+            var permissionChanges = DeterminePermissionsChanges(session, character, playerBiota);
+            var player = ConstructPlayer(playerBiota, possessedBiotas, character, session);
+            session.SetPlayer(player);
+
+            ClearAbandonedSaveInProgress(player);
+            ApplyPermissionProperties(player, permissionChanges);
+            EnsureLocation(player, character, playerBiota, out var olthoiPlayerReturnedToLifestone);
+            SpawnPlayer(player);
+
+            // Send login messages after player is fully materialized in the world
+            // This must run synchronously after AddObject completes to preserve message ordering
+            SendPlayerEnterWorldMessages(session, character, player, olthoiPlayerReturnedToLifestone, permissionChanges.PlayerLoggedInOnNoLogLandblock);
+        }
+
+        /// <summary>
+        /// Sends all post-login messages (DAT warnings, popups, MOTD, etc.) after player is fully materialized.
+        /// This method preserves the exact message ordering from the legacy login flow.
+        /// </summary>
+        private static void SendPlayerEnterWorldMessages(Session session, Character character, Player player, bool olthoiPlayerReturnedToLifestone, bool playerLoggedInOnNoLogLandblock)
+        {
             // These warnings are set by DDD_InterrogationResponse
             if ((session.DatWarnCell || session.DatWarnLanguage || session.DatWarnPortal) && ServerConfig.show_dat_warning.Value)
             {

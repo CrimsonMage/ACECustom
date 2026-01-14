@@ -6839,6 +6839,67 @@ namespace ACE.Server.Command.Handlers
                     $"{parameters[0]} not found.  Type /showprops for a list of properties.");
         }
 
+        [CommandHandler("runtimetoggle", AccessLevel.Admin, CommandHandlerFlag.None, 2, "Sets a runtime toggle value (persists to database)", "runtimetoggle (toggle_name) (true|false)")]
+        public static void HandleRuntimeToggle(Session session, params string[] parameters)
+        {
+            try
+            {
+                var toggleName = parameters[0].ToLowerInvariant();
+                var value = bool.Parse(parameters[1]);
+                bool success = false;
+                string message = "";
+
+                switch (toggleName)
+                {
+                    case "cooperativelogin":
+                    case "cooperative_login":
+                    case "cooperativeloginenabled":
+                        success = RuntimeToggles.SetCooperativeLoginEnabled(value, persistToDatabase: true);
+                        message = $"CooperativeLoginEnabled set to {value}";
+                        break;
+
+                    case "cooperativelandblockload":
+                    case "cooperative_landblock_load":
+                    case "cooperativelandblockloadenabled":
+                        success = RuntimeToggles.SetCooperativeLandblockLoadEnabled(value, persistToDatabase: true);
+                        message = $"CooperativeLandblockLoadEnabled set to {value}";
+                        break;
+
+                    default:
+                        CommandHandlerHelper.WriteOutputInfo(session, $"Unknown runtime toggle: {toggleName}. Available toggles: cooperativelogin, cooperativelandblockload", ChatMessageType.Help);
+                        return;
+                }
+
+                if (success)
+                {
+                    CommandHandlerHelper.WriteOutputInfo(session, message);
+                    PlayerManager.BroadcastToAuditChannel(session?.Player, $"Runtime toggle {toggleName} changed to {value}");
+                }
+            }
+            catch (Exception ex)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, $"Error setting runtime toggle: {ex.Message}. Usage: /runtimetoggle (toggle_name) (true|false)", ChatMessageType.Help);
+            }
+        }
+
+        [CommandHandler("showruntimetoggles", AccessLevel.Admin, CommandHandlerFlag.None, 0, "Displays all runtime toggle values", "showruntimetoggles")]
+        public static void HandleShowRuntimeToggles(Session session, params string[] parameters)
+        {
+            var output = new System.Text.StringBuilder();
+            output.AppendLine("Runtime Toggles:");
+            output.AppendLine($"  CooperativeLoginEnabled: {RuntimeToggles.CooperativeLoginEnabled}");
+            output.AppendLine($"  CooperativeLandblockLoadEnabled: {RuntimeToggles.CooperativeLandblockLoadEnabled}");
+            CommandHandlerHelper.WriteOutputInfo(session, output.ToString());
+        }
+        {
+            ConfigProperty<string>? stringProp = ServerConfig.GetConfigProperty<string>(parameters[0]);
+            CommandHandlerHelper.WriteOutputInfo(
+                session,
+                stringProp != null ?
+                    $"{parameters[0]}: {stringProp.Value}" :
+                    $"{parameters[0]} not found.  Type /showprops for a list of properties.");
+        }
+
         [CommandHandler("resyncproperties", AccessLevel.Admin, CommandHandlerFlag.None, "Resync the properties database")]
         public static void HandleResyncServerProperties(Session session, params string[] parameters)
         {
